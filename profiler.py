@@ -15,7 +15,7 @@ VERTICAL_OFFSET = 10
 SIDE_OFFSET = 10
 MM_PX_V_RATE = 10 # Ratio millimeters to pixels for the final bitmap (vertical)
 MM_PX_H_RATE = 10 # Ratio millimeters to pixels for the final bitmap (horizontal)
-POLY_DEGREE = 20 # degree of the approximation polynome
+POLY_DEGREE = 30 # degree of the approximation polynome
 
 
 def transpose_pixmap(pixmap):
@@ -89,7 +89,6 @@ def unproject(studhorse_path, ref_cloud, heights_px, tresh_laser, line_shift, re
     studhorse_bmp, studhorse_profile = make_profile(ref_cloud, studhorse_cloud, line_shift)
 
     h_px = max([h for h in studhorse_profile if h is not None])
-    print(h_px)
 
     # ... and compute the ratio
     v_ratio = ref_h/h_px
@@ -226,7 +225,7 @@ def run_profiling(reference_path, studhorse_path, sample_path, csv_out_path, tre
     profile_plot.plot(x_data, y_data, 'o', markersize=2, label='Profile')
     profile_plot.set_aspect('equal', adjustable='box')
 
-     #plot the approximated polynoms
+    #plot the approximated polynoms
     for j in range(0, len(x_range)):
          x = np.linspace(x_range[j][0],x_range[j][1])
          y = np.polyval(approximated_polynoms[j],x)
@@ -270,9 +269,9 @@ def main():
     parser.add_argument('--line-drift-tolerance', type=int, default=10,
             help="A pixel will be considered as part of the reference line if it's" +
             'distance to the reference line is inferior to this value')
-    parser.add_argument('--curve-clustering-distance', type=int, default=1000,
-            help="Minimum \"distance\" in px² to seperate point clouds before approximating " +
-            "them with polynomial curves. (default: 1000px²)")
+    parser.add_argument('--curve-clustering-distance', type=float, default=5,
+            help="Minimum \"distance\" in mm² to seperate point clouds before approximating " +
+            "them with polynomial curves. (default: 5mm²)")
 
     args = parser.parse_args()
 
