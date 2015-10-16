@@ -1,23 +1,22 @@
+#stdlib
 import csv
-
-# 47.96mm
+import sys
+import signal
+import argparse
 
 # 3p
 import cv2
 import matplotlib
 import numpy as np
 import matplotlib.pyplot as plt
+import scipy.optimize as optimization
 
-TRESH_LASER = 230
 VERTICAL_OFFSET = 10
 SIDE_OFFSET = 10
-LINE_SHIFT = 10
-COSA = 1/1.41
-REF_H = 101.76 # mm
-REF_W = 102.87 # mm
 MM_PX_V_RATE = 10 # Ratio millimeters to pixels for the final bitmap (vertical)
 MM_PX_H_RATE = 10 # Ratio millimeters to pixels for the final bitmap (horizontal)
-HEIGHT_THRESHOLD = 200 # pixel jump to start/stop detection of the studhorse
+POLY_DEGREE = 20 # degree of the approximation polynome
+
 
 def transpose_pixmap(pixmap):
     ret = np.zeros((pixmap.shape[1], pixmap.shape[0], pixmap.shape[2]), np.uint8)
@@ -26,12 +25,12 @@ def transpose_pixmap(pixmap):
             ret[j][i] = elt
     return ret
 
-def laser_cloud_from_picture_in_px_before_projection(picture_path):
+def laser_cloud_from_picture_in_px_before_projection(picture_path, tresh_laser):
     # Load the image
     image = cv2.imread(picture_path)
 
-    # Tresholding of the image (TODO: make threshold parametrizable)
-    ret, tresh_img = cv2.threshold(image, TRESH_LASER, 255, cv2.THRESH_TOZERO)
+    # Tresholding of the image
+    ret, tresh_img = cv2.threshold(image, tresh_laser, 255, cv2.THRESH_TOZERO)
 
     # Peak detection
     i = 0
@@ -57,13 +56,13 @@ def pixel_intensity(pixel):
     # TODO: make coefficients parametrizable
     return 1/2*pixel[1] + 1/2*pixel[2]
 
-def make_profile(ref_cloud, sample_cloud):
+def make_profile(ref_cloud, sample_cloud, line_shift):
     heights = []
 
     # Compute the differences and keep track of the max
     max_height = 0
     for j, p in enumerate(sample_cloud):
-        if p is not None and ref_cloud[j] is not None and (ref_cloud[j] - p) > LINE_SHIFT:
+        if p is not None and ref_cloud[j] is not None and (ref_cloud[j] - p) > line_shift:
             heights.append(ref_cloud[j] - p)
             if ref_cloud[j] - p > max_height:
                 max_height = ref_cloud[j] - p
@@ -81,24 +80,26 @@ def make_profile(ref_cloud, sample_cloud):
 
     return bitmap, heights
 
-def unproject(studhorse_path, ref_cloud, heights_px):
+def unproject(studhorse_path, ref_cloud, heights_px, tresh_laser, line_shift, ref_h, ref_w,
+              height_threshold):
     # Let's compute the profile of the reference...
     studhorse_cloud, bitmap = laser_cloud_from_picture_in_px_before_projection(
-            studhorse_path)
+            studhorse_path, tresh_laser)
 
-    studhorse_bmp, studhorse_profile = make_profile(ref_cloud, studhorse_cloud)
+    studhorse_bmp, studhorse_profile = make_profile(ref_cloud, studhorse_cloud, line_shift)
 
     h_px = max([h for h in studhorse_profile if h is not None])
+    print(h_px)
 
     # ... and compute the ratio
-    v_ratio = REF_H/h_px
+    v_ratio = ref_h/h_px
 
     # The horizontal ratio is computed in a slightly different way
     x1 = None
     y1 = 0
     x2 = None
     for i, h in enumerate(studhorse_profile):
-        if h is not None and abs(h - y1) > HEIGHT_THRESHOLD:
+        if h is not None and abs(h - y1) > height_threshold:
             if x1 is None:
                 x1 = i
                 y1 = h
@@ -112,38 +113,94 @@ def unproject(studhorse_path, ref_cloud, heights_px):
     if x2 is None:
         x2 = [(i, h) for i, h in enumerate(studhorse_profile) if h is not None][-1][0]
 
-    h_ratio = REF_W/(x2-x1)
+    h_ratio = ref_w/(x2-x1)
 
     # To finally get ourselves a nice scaled profile in millimeters
     heights_mm = []
     for j, h in enumerate(heights_px):
         x_mm = j*h_ratio
-        heights_mm.append((x_mm, h*v_ratio if h is not None else None))
+        if h is not None:
+            heights_mm.append((x_mm, h*v_ratio))
 
-    return heights_mm
+    return heights_mm, studhorse_bmp
 
 
-def run_profiling(reference_path, studhorse_path, sample_path, out_path, csv_out_path):
+def distance(array,i,j):
+    val = (array[i][0]-array[j][0])*(array[i][0]-array[j][0]) + (array[i][1]-array[j][1])*(array[i][1]-array[j][1])
+    return val
+
+
+def polynomial_approximation(values_table, epsilon):
+
+    i=0
+    xdata = [np.array([-1])]#unknow size so we initialize a np.array with a value that will be deleted afterwards (cant initialize with nothing)
+    ydata = [np.array([-1])]#unknow size so we initialize a np.array with a value that will be deleted afterwards (cant initialize with nothing)
+    xinit = None
+    xfinal = None
+    x_range = []
+    for j,px in enumerate(values_table):
+
+        if(xinit is None):
+            xinit = px[0]
+
+        if(j>0 and distance(values_table,j,j-1)>epsilon):
+            xfinal = values_table[j-1][0]
+            x_range.append([xinit,xfinal])
+            xinit = None
+
+            xdata[i] = np.delete(xdata[i], 0, 0)#delete the initial -1 value
+            ydata[i] = np.delete(ydata[i], 0, 0)#delete the initial -1 value
+            xdata.append(np.array([-1]))#unknow size so we initialize a np.array with a value that will be deleted afterwards (cant initialize with nothing)
+            ydata.append(np.array([-1]))#unknow size so we initialize a np.array with a value that will be deleted afterwards (cant initialize with nothing)
+            i = i+1
+
+        xdata[i] = np.append(xdata[i], [px[0]])
+        ydata[i] = np.append(ydata[i], [px[1]])
+
+    xdata[i] = np.delete(xdata[i], 0, 0)#delete the initial -1 value
+    ydata[i] = np.delete(ydata[i], 0, 0)#delete the initial -1 value
+    xfinal = xdata[i][len(xdata[i])-1]
+    x_range.append([xinit,xfinal])
+
+    #curves' approximation
+    polynoms = []
+    for j in range(0,len(xdata)):
+
+        opt_coeff = np.polyfit(xdata[j], ydata[j], POLY_DEGREE)
+        polynoms.append(opt_coeff)
+
+    return polynoms,x_range
+
+def run_profiling(reference_path, studhorse_path, sample_path, csv_out_path, tresh_laser,
+        line_shift, ref_h, ref_w, height_threshold, epsilon):
     # Get clouds from it
     print("Generating cloud for reference image...")
-    ref_cloud, bitmap = laser_cloud_from_picture_in_px_before_projection(reference_path)
+    ref_cloud, bitmap = laser_cloud_from_picture_in_px_before_projection(reference_path,
+            tresh_laser)
     cv2.namedWindow('Reference', cv2.WINDOW_NORMAL)
     cv2.imshow('Reference', bitmap)
 
     print("Generating cloud for artifact image...")
-    sample_cloud, bitmap = laser_cloud_from_picture_in_px_before_projection(sample_path)
+    sample_cloud, bitmap = laser_cloud_from_picture_in_px_before_projection(sample_path,
+            tresh_laser)
     cv2.namedWindow('Sample', cv2.WINDOW_NORMAL)
     cv2.imshow('Sample', bitmap)
 
     # Get the profile as a bitmap
     print("Generating pixel profile...")
-    profile, heights_px = make_profile(ref_cloud, sample_cloud)
+    profile, heights_px = make_profile(ref_cloud, sample_cloud, line_shift)
     cv2.namedWindow('Pixel profile', cv2.WINDOW_NORMAL)
     cv2.imshow('Pixel profile', profile)
 
     # Get a profile in millimeters and another one in pixels
     print("Using the studhorse to get a profile in millimeters...")
-    heights_mm = unproject(studhorse_path, ref_cloud, heights_px)
+    heights_mm, bitmap = unproject(studhorse_path, ref_cloud, heights_px, tresh_laser,
+                                   line_shift, ref_h, ref_w, height_threshold)
+    cv2.namedWindow('Studhorse profile', cv2.WINDOW_NORMAL)
+    cv2.imshow('Studhorse profile', bitmap)
+
+    print("Generating profile approximation...")
+    approximated_polynoms,x_range = polynomial_approximation(heights_mm, epsilon)
 
     # Let's save the profile
     x_data = []
@@ -153,7 +210,6 @@ def run_profiling(reference_path, studhorse_path, sample_path, out_path, csv_out
                 quoting=csv.QUOTE_MINIMAL)
         for x, h in heights_mm:
             if h is not None:
-                print([x, h])
                 profile_writer.writerow([x, h])
                 x_data.append(x)
                 y_data.append(h)
@@ -167,22 +223,73 @@ def run_profiling(reference_path, studhorse_path, sample_path, out_path, csv_out
     profile_plot.set_title("Profile Peeelot")
     profile_plot.set_xlabel("mm")
     profile_plot.set_ylabel("mm")
-    profile_plot.plot(x_data, y_data, '-', label='Profile')
+    profile_plot.plot(x_data, y_data, 'o', markersize=2, label='Profile')
+    profile_plot.set_aspect('equal', adjustable='box')
+
+     #plot the approximated polynoms
+    for j in range(0, len(x_range)):
+         x = np.linspace(x_range[j][0],x_range[j][1])
+         y = np.polyval(approximated_polynoms[j],x)
+         approximated_plot = fig.add_subplot(111)
+         approximated_plot.set_title("Approximated profile")
+         approximated_plot.set_xlabel("mm")
+         approximated_plot.set_ylabel("mm")
+         approximated_plot.plot(x, y, '-', linewidth=2, label='Approximated profile')
+         approximated_plot.set_aspect('equal', adjustable='box')
+
     plt.show()
 
     # Display it
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+def main():
+    REFERENCE_PATH_DEFAULT = './samples/reference.jpg'
+    STUDHORSE_PATH_DEFAULT = './samples/studhorse.jpg'
 
-if __name__ == '__main__':
-    # Load the reference image TODO FIXME: make it possible to pass everything as
-    # an argument (yes command line can be sexy)
-    REFERENCE_PATH = './samples/reference.jpg'
-    STUDOHORSE_PATH = './samples/studhorse.jpg'
-    PROFILE_PATH = './samples/first.jpg'
+    # Let's parse our arguments
+    parser = argparse.ArgumentParser(description='Creates the 2d profile of an object using ' +
+            "a laser diode and a camera. \n\n MAREVA - Projet Tesson - \n\n Pierre Benedetti \n Etienne Lafarge \n Vincent Villet")
+    parser.add_argument('--source', type=str, required=True,
+            help='Path to the picture to analyse')
+    parser.add_argument('--dest', type=str, default='',
+            help='Desired path for the output file (defaults to <source>.csv)')
+    parser.add_argument('--reference', type=str, default=REFERENCE_PATH_DEFAULT,
+            help='Path to the reference picture (laser line without an object).')
+    parser.add_argument('--studhorse', type=str, default=STUDHORSE_PATH_DEFAULT,
+            help='Path to the studhorse picture (for calibration).')
+    parser.add_argument('--tresh-laser', type=int, default=230,
+            help='Intensity threshold (0-255) to isolate the laser line. (default: 230)')
+    parser.add_argument('--studhorse-height-tresh', type=int, default=40,
+            help='Minimum height jump (in px) to detect the beginning/end of the ' +
+                 'studhorse on the picture (defaults to 10px).')
+    parser.add_argument('--studhorse-height', type=float, default=14.62, required=True,
+            help='The height of the studhorse (in millimeters).')
+    parser.add_argument('--studhorse-width', type=float, default=88.69, required=True,
+            help='The width of the studhorse (in millimeters).')
+    parser.add_argument('--line-drift-tolerance', type=int, default=10,
+            help="A pixel will be considered as part of the reference line if it's" +
+            'distance to the reference line is inferior to this value')
+    parser.add_argument('--curve-clustering-distance', type=int, default=1000,
+            help="Minimum \"distance\" in px² to seperate point clouds before approximating " +
+            "them with polynomial curves. (default: 1000px²)")
 
-    # TODO FIXME: catch CTRL-C interrupt signals
+    args = parser.parse_args()
+
+    if args.dest == '':
+        args.dest =  args.source + '.csv'
+        pass
+
+    # Catch interrupt signals
+    def interrupt_handler(signal, frame):
+        print("CTRL-C has been pressed, exiting...")
+        sys.exit(0)
 
     # Launch the main function
-    run_profiling(REFERENCE_PATH, STUDOHORSE_PATH, PROFILE_PATH, './out.png', 'profile.csv')
+    run_profiling(args.reference, args.studhorse, args.source, args.dest, args.tresh_laser,
+                  args.line_drift_tolerance, args.studhorse_height, args.studhorse_width,
+                  args.studhorse_height_tresh, args.curve_clustering_distance)
+
+
+if __name__ == '__main__':
+    main()
